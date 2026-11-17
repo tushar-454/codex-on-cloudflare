@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import worker from "../../src/index";
 import { MODELS, supportedEfforts } from "../../src/models";
+import { convertTools, flattenToolName } from "../../src/responses";
 import { API_KEY, fakeEnv, parseSse, post, streamingEnv, textChunks, toolChunks, upstreamSse } from "./helpers";
 
 const call = (req: Request, env: Parameters<typeof worker.fetch>[1]) => worker.fetch(req, env);
@@ -315,6 +316,22 @@ describe("Codex conversation translation", () => {
     const events = parseSse(await (await call(post(codexTurn2), env)).text());
     const done = events.find((e) => e.event === "response.output_item.done" && (e.data.item as { type: string }).type === "function_call");
     expect(done?.data.item).toMatchObject({ name: "spawn_agent", namespace: "multi_agent_v1", arguments: '{"task":"x"}' });
+  });
+
+  it("sanitizes MCP namespaces with invalid characters and maps calls back", async () => {
+    const ns = "mcp__figma.com@plugin/v1__";
+    const inner = "get_design_context_for_a_really_long_component_name_here";
+    const flat = flattenToolName(ns, inner);
+    expect(flat).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+    expect(flattenToolName(ns, inner)).toBe(flat);
+    expect(flattenToolName("multi_agent_v1", "spawn_agent")).toBe("multi_agent_v1__spawn_agent");
+    const converted = convertTools([
+      { type: "namespace", name: ns, tools: [{ type: "function", name: inner, parameters: { type: "object", properties: {} } }] },
+      { type: "function", name: "bad.name", parameters: { type: "object", properties: {} } },
+    ]);
+    expect(converted.tools.map((t) => t.function.name)).toEqual([flat]);
+    expect(converted.namespacedTools.get(flat)).toEqual({ namespace: ns, name: inner });
+    expect(converted.dropped).toEqual(["invalid-name:bad.name"]);
   });
 
   it("answers orphaned tool calls so chat templates stay valid", async () => {

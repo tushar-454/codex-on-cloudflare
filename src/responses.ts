@@ -400,7 +400,25 @@ const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
  * upstream, because chat function calling has no namespaces.
  */
 export function flattenToolName(namespace: string, name: string): string {
-  return name.startsWith(namespace) ? name : `${namespace}__${name}`;
+  const joined = name.startsWith(namespace) ? name : `${namespace}__${name}`;
+  if (NAME_RE.test(joined)) return joined;
+  // MCP/plugin namespaces can carry characters like '.', '@', '/' or ':' and long names;
+  // upstream only accepts ^[a-zA-Z0-9_-]{1,64}$. Sanitize deterministically (the same
+  // input always maps to the same name, so history items line up) and keep a hash
+  // suffix when we had to alter or truncate, so distinct tools stay distinct.
+  const clean = joined.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const suffix = `_${fnv1a(joined)}`;
+  return clean.length <= 64 && clean === joined ? clean : `${clean.slice(0, 64 - suffix.length)}${suffix}`;
+}
+
+/** 32-bit FNV-1a, base36: short stable suffix for sanitized tool names. */
+function fnv1a(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
 }
 
 export interface ConvertedTools {
@@ -420,7 +438,12 @@ export function convertTools(tools: unknown): ConvertedTools {
   if (!Array.isArray(tools)) throw invalid("'tools' must be an array.", "tools");
 
   const addFunction = (name: unknown, description: unknown, parameters: unknown, param: string): void => {
-    if (typeof name !== "string" || !NAME_RE.test(name)) throw invalid("Tool names must match ^[a-zA-Z0-9_-]{1,64}$.", param);
+    if (typeof name !== "string" || name === "") throw invalid("Tool names must be non-empty strings.", param);
+    if (!NAME_RE.test(name)) {
+      // One odd tool name (e.g. from an MCP server) shouldn't fail the whole turn.
+      dropped.push(`invalid-name:${name.slice(0, 40)}`);
+      return;
+    }
     result.push({
       type: "function",
       function: {
