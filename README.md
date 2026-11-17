@@ -61,6 +61,8 @@ To add or remove a model, edit `MODELS` in [src/models.ts](src/models.ts) and ru
 
 ## Setup
 
+**Quick setup:** run `./setup.sh`. It installs pnpm and dependencies, logs in to Wrangler, lets you pick your Cloudflare account (written to `wrangler.jsonc`), generates `SNOWY_API_KEY`, deploys the Worker with the secret, checks the endpoint, installs Codex if needed, and adds the `cloudflare` provider and `snowy` profile. Your default `codex` setup is not changed. It is safe to re-run. `./setup.sh --help` lists the options. The manual steps follow.
+
 Requirements: Node 22.18 or newer (24 recommended), pnpm (`corepack enable pnpm`), Codex CLI 0.169 or newer, and a Cloudflare account on the Workers Free plan.
 
 ```sh
