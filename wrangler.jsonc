@@ -1,6 +1,6 @@
 {
     "$schema": "node_modules/wrangler/config-schema.json",
-    "name": "snowy-worker",
+    "name": "snowy",
     "main": "src/index.ts",
     "account_id": "7ab77eaa396c9a6435e5659a299e07cf",
     "compatibility_date": "2026-11-16",
@@ -14,6 +14,8 @@
         "MAX_BODY_BYTES": "4000000",
         // Default model when a request omits "model" (Codex always sends one).
         "DEFAULT_MODEL": "@cf/zai-org/glm-4.7-flash",
+        // "paid" lists + accepts Workers Paid-only models (DeepSeek V4, GLM-5.3, ...). setup.sh detects and sets this.
+        "WORKERS_PLAN": "paid",
     },
     // SNOWY_API_KEY is a secret: `wrangler secret put SNOWY_API_KEY` (never put it here).
 }

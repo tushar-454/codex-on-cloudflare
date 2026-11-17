@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import worker from "../../src/index";
-import { MODELS, supportedEfforts } from "../../src/models";
+import { MODELS, modelsForPlan, parsePlan, supportedEfforts } from "../../src/models";
 import { convertTools, flattenToolName } from "../../src/responses";
 import { API_KEY, fakeEnv, parseSse, post, streamingEnv, textChunks, toolChunks, upstreamSse } from "./helpers";
 
@@ -121,7 +121,7 @@ describe("request validation", () => {
   });
   it("400 on unsupported model without calling Workers AI (cost guard)", async () => {
     const env = streamingEnv(textChunks("x"));
-    for (const model of ["@cf/zai-org/glm-5.3", "gpt-5", "@cf/meta/llama-3.2-1b-instruct", 123]) {
+    for (const model of ["@cf/moonshotai/kimi-k2.6", "gpt-5", "@cf/meta/llama-3.2-1b-instruct", 123]) {
       const res = await call(post(basicBody({ model })), env);
       expect(res.status).toBe(400);
       expect((await errorOf(res)).code).toMatch(/model_not_supported|invalid_request/);
@@ -162,21 +162,63 @@ describe("request validation", () => {
   });
 });
 
+const PAID = { WORKERS_PLAN: "paid" } as const;
+const listReq = () => new Request("https://x/v1/models", { headers: { Authorization: `Bearer ${API_KEY}` } });
+type ModelList = { object: string; workers_plan: string; data: { id: string; object: string; requires_workers_paid: boolean }[] };
+
 describe("supported models", () => {
-  it("lists every registered model in OpenAI list format", async () => {
-    const res = await call(new Request("https://x/v1/models", { headers: { Authorization: `Bearer ${API_KEY}` } }), streamingEnv([]));
-    const body = (await res.json()) as { object: string; data: { id: string; object: string; reasoning_efforts: string[] }[] };
+  it("Free plan (default) lists only the non-retired free models in OpenAI list format", async () => {
+    const res = await call(listReq(), streamingEnv([]));
+    const body = (await res.json()) as ModelList;
     expect(body.object).toBe("list");
+    expect(body.workers_plan).toBe("free");
     const now = new Date().toISOString().slice(0, 10);
-    const active = MODELS.filter((m) => !m.sunset || now < m.sunset);
+    const active = MODELS.filter((m) => !m.requiresPaid && (!m.sunset || now < m.sunset));
     expect(body.data.map((m) => m.id).sort()).toEqual(active.map((m) => m.id).sort());
-    for (const m of body.data) expect(m.object).toBe("model");
+    for (const m of body.data) {
+      expect(m.object).toBe("model");
+      expect(m.requires_workers_paid).toBe(false);
+    }
+  });
+
+  it("Paid plan lists paid models first, then every free model", async () => {
+    const body = (await (await call(listReq(), streamingEnv([], PAID))).json()) as ModelList;
+    expect(body.workers_plan).toBe("paid");
+    const ids = body.data.map((m) => m.id);
+    expect(ids).toEqual(modelsForPlan("paid").map((m) => m.id));
+    const firstFree = body.data.findIndex((m) => !m.requires_workers_paid);
+    expect(firstFree).toBeGreaterThan(0);
+    expect(body.data.slice(firstFree).every((m) => !m.requires_workers_paid)).toBe(true);
+    expect(ids).toEqual(expect.arrayContaining(modelsForPlan("free").map((m) => m.id)));
+  });
+
+  it("Free plan rejects paid-only models with 403 before calling Workers AI", async () => {
+    for (const plan of [undefined, "free", "", "PAID-ish"]) {
+      const env = streamingEnv(textChunks("x"), { WORKERS_PLAN: plan });
+      const res = await call(post(basicBody({ model: "@cf/zai-org/glm-5.3" })), env);
+      expect(res.status).toBe(403);
+      expect((await errorOf(res)).code).toBe("model_requires_paid_plan");
+      expect(env.calls).toHaveLength(0);
+    }
+  });
+
+  it("parsePlan accepts only an explicit 'paid'", () => {
+    expect(parsePlan("paid")).toBe("paid");
+    expect(parsePlan(" Paid ")).toBe("paid");
+    for (const v of [undefined, null, "", "free", "pro", 1]) expect(parsePlan(v)).toBe("free");
+  });
+
+  it("paid models map Codex xhigh to the upstream 'max' level", async () => {
+    const env = streamingEnv(textChunks("ok"), PAID);
+    const res = await call(post(basicBody({ model: "@cf/deepseek-ai/deepseek-v4.1-flash-1017", reasoning: { effort: "xhigh" } })), env);
+    expect(res.status).toBe(200);
+    expect(env.calls[0]?.inputs.reasoning_effort).toBe("max");
   });
 
   for (const model of MODELS) {
     describe(model.id, () => {
       it("basic streamed inference sends the model id and an explicit max_tokens", async () => {
-        const env = streamingEnv(textChunks("Hello from " + model.displayName));
+        const env = streamingEnv(textChunks("Hello from " + model.displayName), PAID);
         const res = await call(post(basicBody({ model: model.id })), env);
         if (model.sunset && new Date().toISOString().slice(0, 10) >= model.sunset) {
           expect(res.status).toBe(410);
@@ -192,7 +234,7 @@ describe("supported models", () => {
 
       it("tool calling round-trips into a function_call item", async () => {
         if (model.sunset && new Date().toISOString().slice(0, 10) >= model.sunset) return;
-        const env = streamingEnv(toolChunks("exec_command", '{"cmd":"ls"}', "call_x1"));
+        const env = streamingEnv(toolChunks("exec_command", '{"cmd":"ls"}', "call_x1"), PAID);
         const res = await call(
           post(basicBody({ model: model.id, tools: [{ type: "function", name: "exec_command", description: "run", parameters: { type: "object", properties: { cmd: { type: "string" } } } }] })),
           env,
@@ -208,7 +250,7 @@ describe("supported models", () => {
         if (model.sunset && new Date().toISOString().slice(0, 10) >= model.sunset) return;
         const supported = supportedEfforts(model);
         for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh"]) {
-          const env = streamingEnv(textChunks("ok"));
+          const env = streamingEnv(textChunks("ok"), PAID);
           const res = await call(post(basicBody({ model: model.id, reasoning: { effort, summary: "auto" } })), env);
           if (model.reasoning === null) {
             // Not applicable: accepted, nothing reasoning-related sent upstream, reported in header.

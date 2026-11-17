@@ -11,11 +11,12 @@ Codex CLI ──(Responses API + SSE, Bearer SNOWY_API_KEY)──▶ SNOWy Worke
 
 ## Models
 
-All of these are Workers **Free** plan models. Each one was called live on a Free account on 2026-11-17. Codex status means:
+SNOWy serves two sets of models. Which one you get depends on the `WORKERS_PLAN` var in [wrangler.jsonc](wrangler.jsonc), and `./setup.sh` sets that var for you (see [Workers Paid models](#workers-paid-models)). The free models below were each called live on a Free account on 2026-11-17. Codex status means:
 
 - **verified**: a real Codex CLI 0.169 session worked (tool calls, local execution, results sent back, final answer).
 - **compatible**: streaming, tool calls and a tool round trip all passed live through SNOWy, but no real Codex session was run.
 - **limited**: works, but has a known problem with Codex (see the notes).
+- **untested**: a paid model whose request format matches Cloudflare's catalog schema but that hasn't yet been run live through SNOWy.
 
 | Model | Category | Context | Reasoning effort | Codex | Neurons per M tokens (in / out) |
 |---|---|---|---|---|---|
@@ -43,9 +44,27 @@ All of these are Workers **Free** plan models. Each one was called live on a Fre
 | Best free general-purpose model | Gemma 4 26B A4B | Verified (fixed a bug first try), 256k context, accepts images, and prefix-cache hits were observed. |
 | Fastest economical model | Granite 4.0 H Micro for chat; GLM-4.7 Flash for Codex | Granite costs about 1,500 Neurons per M input tokens but is unreliable for agent work. |
 
+### Workers Paid models
+
+These models return error 5035 on Workers Free. They're listed and accepted only when `WORKERS_PLAN` is `"paid"`. In that case `GET /v1/models` and Codex's `/model` picker show them **first**, followed by every free model. On Free, a request that names one of them gets **403 `model_requires_paid_plan`**, and Workers AI is never called. Usage is billed per token to the account.
+
+| Model | Category | Context | Reasoning effort | Codex | USD per M tokens (in / out) |
+|---|---|---|---|---|---|
+| `@cf/zai-org/glm-5.3` | Coding | 1M | `low`, `high`, `xhigh`→max (default); can't be turned off | untested | 1.40 / 4.40 |
+| `@cf/deepseek-ai/deepseek-v4-pro-0813` | Reasoning | 1M | `none`, `low`, `high` (default), `xhigh`→max | untested, **retires 2026-11-20** | 1.32 / 3.96 |
+| `@cf/moonshotai/kimi-k2.7-code` | Coding | 262k | always on (`high`) | untested, **retires 2026-11-20** | 0.95 / 4.00 |
+| `@cf/deepseek-ai/deepseek-v4.1-flash-1017` | Coding | 1M | `none`, `low`, `high` (default), `xhigh`→max | untested | 0.30 / 1.20 |
+| `@cf/thinkingmachines/inkling-2-small` | General | 1M | `none` … `high` (default), `xhigh`→max | untested | 0.30 / 1.00 |
+
+Codex's highest effort level is `xhigh`, so SNOWy sends it as Cloudflare's `max`. Models past their retirement date disappear from the list automatically.
+
+**How setup picks the plan:** `./setup.sh` makes one call to `deepseek-v4.1-flash-1017` with a 1-token output on the account you selected. A Free account answers HTTP 403 / error 5035, which isn't billed. A Paid account answers normally, which costs a fraction of a cent. Setup then asks you to confirm before turning paid models on, writes `WORKERS_PLAN` to `wrangler.jsonc`, deploys, and builds the Codex catalog with `--plan`. To skip the check, use `./setup.sh --plan=paid`, `--plan=free`, or `SNOWY_PLAN=...`. To do it by hand, set `"WORKERS_PLAN": "paid"`, run `pnpm run deploy`, then run `pnpm codex:catalog --out ~/.codex/snowy-models.json --plan paid`.
+
+Claude, GPT-5 and Gemini aren't Workers AI models. Cloudflare only offers them through AI Gateway, and SNOWy doesn't support that yet.
+
 **Not included:**
 
-- Models that need a paid plan, which return error 5035 on Free: kimi-k2.6, kimi-k2.7-code, glm-5.2, glm-5.3, glm-5.3-flash, deepseek-v4-flash-0731, deepseek-v4.1-flash-1017, deepseek-v4-pro-0813 and inkling-2-small.
+- Paid models that have been replaced by newer ones and retire on 2026-11-20: kimi-k2.6, glm-5.2, glm-5.3-flash and deepseek-v4-flash-0731.
 - Models without function calling: qwen2.5-coder-32b, llama-3.2-*, llama-3.1-8b-fp8, gemma-sea-lion and the LoRA models.
 - Models retiring on 2026-11-20: qwq-32b, deepseek-r1-distill and qwen3-30b-a3b.
 - Classifiers: llama-guard and the clef models.
@@ -63,13 +82,13 @@ To add or remove a model, edit `MODELS` in [src/models.ts](src/models.ts) and ru
 
 **Quick setup:** run `./setup.sh`. It installs pnpm and dependencies, logs in to Wrangler, lets you pick your Cloudflare account (written to `wrangler.jsonc`), generates `SNOWY_API_KEY`, deploys the Worker with the secret, checks the endpoint, installs Codex if needed, and adds the `cloudflare` provider and `snowy` profile. Your default `codex` setup is not changed. It is safe to re-run. `./setup.sh --help` lists the options. The manual steps follow.
 
-Requirements: Node 22.18 or newer (24 recommended), pnpm (`corepack enable pnpm`), Codex CLI 0.169 or newer, and a Cloudflare account on the Workers Free plan.
+Requirements: Node 22.18 or newer (24 recommended), pnpm (`corepack enable pnpm`), Codex CLI 0.169 or newer, and a Cloudflare account. Workers Free works. Workers Paid also unlocks the paid models.
 
 ```sh
 # 1. Install
 pnpm install
 
-# 2. Authenticate Wrangler (pick your Free-plan account if you have several)
+# 2. Authenticate Wrangler (pick the account you want if you have several)
 pnpm exec wrangler login
 export CLOUDFLARE_ACCOUNT_ID=<your account id>   # `pnpm exec wrangler whoami` lists them
 

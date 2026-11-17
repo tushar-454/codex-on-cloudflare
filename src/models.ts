@@ -1,10 +1,13 @@
 /**
  * Model registry: the ONLY models SNOWy will forward to Workers AI.
  *
- * Every entry was checked against the Cloudflare docs (2026-11-17) AND a live
- * env.AI.run() call on a Workers Free account. To add/remove a model, edit MODELS
- * below; nothing else needs to change. Paid-only models (error 5035 on Free) must
- * not be added.
+ * Free-plan entries were checked against the Cloudflare docs (2026-11-17) AND a live
+ * env.AI.run() call on a Workers Free account. Paid-only entries (`requiresPaid`,
+ * error 5035 on Free) come from the Workers AI model catalog API (2026-11-17:
+ * require_workers_paid, context_window, reasoning_effort, price) and are only listed
+ * and accepted when the Worker runs with WORKERS_PLAN="paid" (setup.sh detects the
+ * plan and sets it). To add/remove a model, edit MODELS below; nothing else needs to
+ * change.
  *
  * Reasoning effort: `efforts` maps each *accepted* OpenAI effort value to the exact
  * upstream parameters for that model. Values not listed are rejected with HTTP 400 –
@@ -37,7 +40,17 @@ export type CodexStatus =
   /** Streaming + tool-call round trip verified live via the binding; not run under real Codex. */
   | "compatible"
   /** Works, but a hard limit (e.g. small context) makes real Codex sessions unreliable. */
-  | "limited";
+  | "limited"
+  /** Paid-only: request format matches the catalog schema, not yet run live through SNOWy. */
+  | "untested";
+
+/** Cloudflare Workers plan of the account the Worker runs on (wrangler var WORKERS_PLAN). */
+export type Plan = "free" | "paid";
+
+/** Anything other than an explicit "paid" is treated as Free (fail closed: no paid models). */
+export function parsePlan(value: unknown): Plan {
+  return typeof value === "string" && value.trim().toLowerCase() === "paid" ? "paid" : "free";
+}
 
 export interface ModelSpec {
   id: string;
@@ -53,6 +66,8 @@ export interface ModelSpec {
   reasoning: ReasoningSpec | null;
   /** Live env.AI.run() call succeeded on a Workers Free account. */
   freePlanVerified: boolean;
+  /** Workers Paid plan only (Workers AI error 5035 on Free). */
+  requiresPaid?: boolean;
   codex: CodexStatus;
   /** Neurons per 1M tokens, from the pricing page (cost guard / docs). */
   neurons: { inputPerM: number; outputPerM: number };
@@ -91,7 +106,131 @@ const THINKING_TOGGLE: ReasoningSpec = {
   },
 };
 
-export const MODELS: readonly ModelSpec[] = [
+/**
+ * Catalog reasoning_effort levels max/high/low[/none]. Codex has no "max", so its top
+ * level "xhigh" sends "max" explicitly; "medium"/"minimal" are not offered because the
+ * catalog only aliases them to another level.
+ */
+function maxHighLow(opts: { none: boolean; defaultEffort: Effort; defaultBehavior: string }): ReasoningSpec {
+  return {
+    control: "reasoning_effort",
+    defaultEffort: opts.defaultEffort,
+    defaultBehavior: opts.defaultBehavior,
+    efforts: {
+      ...(opts.none ? { none: { reasoning_effort: "none" } } : {}),
+      low: { reasoning_effort: "low" },
+      high: { reasoning_effort: "high" },
+      xhigh: { reasoning_effort: "max" },
+    },
+  };
+}
+
+/** USD per 1M tokens -> Neurons per 1M tokens ($0.011 per 1,000 Neurons). */
+const usd = (inputPerM: number, outputPerM: number) => ({
+  inputPerM: Math.round((inputPerM / 0.011) * 1000),
+  outputPerM: Math.round((outputPerM / 0.011) * 1000),
+});
+
+/** Workers Paid only. Listed before the free models when WORKERS_PLAN="paid". */
+const PAID_MODELS: readonly ModelSpec[] = [
+  {
+    id: "@cf/zai-org/glm-5.3",
+    displayName: "GLM-5.3",
+    category: "Coding",
+    contextWindow: 1_048_576,
+    defaultMaxOutputTokens: 32_768,
+    functionCalling: true,
+    streaming: true,
+    vision: false,
+    reasoning: maxHighLow({ none: false, defaultEffort: "xhigh", defaultBehavior: "max (reasoning cannot be disabled)" }),
+    freePlanVerified: false,
+    requiresPaid: true,
+    codex: "untested",
+    neurons: usd(1.4, 4.4),
+    notes: "Z.ai flagship agentic coding model, 1M context. $1.40 / $4.40 per M tokens in/out.",
+  },
+  {
+    id: "@cf/deepseek-ai/deepseek-v4-pro-0813",
+    displayName: "DeepSeek V4 Pro",
+    category: "Reasoning",
+    contextWindow: 1_048_576,
+    defaultMaxOutputTokens: 32_768,
+    functionCalling: true,
+    streaming: true,
+    vision: false,
+    reasoning: maxHighLow({ none: true, defaultEffort: "high", defaultBehavior: "high" }),
+    freePlanVerified: false,
+    requiresPaid: true,
+    codex: "untested",
+    neurons: usd(1.32, 3.96),
+    sunset: "2026-11-20",
+    notes: "Cloudflare retires this model on 2026-11-20. $1.32 / $3.96 per M tokens in/out.",
+  },
+  {
+    id: "@cf/moonshotai/kimi-k2.7-code",
+    displayName: "Kimi K2.7 Code",
+    category: "Coding",
+    contextWindow: 262_144,
+    defaultMaxOutputTokens: 32_768,
+    functionCalling: true,
+    streaming: true,
+    vision: true,
+    // Reasoning is mandatory and has no effort parameter: only the default level exists.
+    reasoning: { control: "enable_thinking", defaultEffort: "high", defaultBehavior: "high (always on)", efforts: { high: {} } },
+    freePlanVerified: false,
+    requiresPaid: true,
+    codex: "untested",
+    neurons: usd(0.95, 4),
+    sunset: "2026-11-20",
+    notes: "Cloudflare retires this model on 2026-11-20. $0.95 / $4.00 per M tokens in/out.",
+  },
+  {
+    id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    displayName: "DeepSeek V4.1 Flash",
+    category: "Coding",
+    contextWindow: 1_048_576,
+    defaultMaxOutputTokens: 32_768,
+    functionCalling: true,
+    streaming: true,
+    vision: true,
+    reasoning: maxHighLow({ none: true, defaultEffort: "high", defaultBehavior: "high" }),
+    freePlanVerified: false,
+    requiresPaid: true,
+    codex: "untested",
+    neurons: usd(0.3, 1.2),
+    notes: "Cheapest paid frontier model, 1M context. $0.30 / $1.20 per M tokens in/out.",
+  },
+  {
+    id: "@cf/thinkingmachines/inkling-2-small",
+    displayName: "Inkling 2 Small",
+    category: "General",
+    contextWindow: 1_048_576,
+    defaultMaxOutputTokens: 32_768,
+    functionCalling: true,
+    streaming: true,
+    vision: true,
+    reasoning: {
+      control: "reasoning_effort",
+      defaultEffort: "high",
+      defaultBehavior: "high",
+      efforts: {
+        none: { reasoning_effort: "none" },
+        minimal: { reasoning_effort: "minimal" },
+        low: { reasoning_effort: "low" },
+        medium: { reasoning_effort: "medium" },
+        high: { reasoning_effort: "high" },
+        xhigh: { reasoning_effort: "max" },
+      },
+    },
+    freePlanVerified: false,
+    requiresPaid: true,
+    codex: "untested",
+    neurons: usd(0.3, 1),
+    notes: "594B MoE, 1M context. $0.30 / $1.00 per M tokens in/out.",
+  },
+];
+
+const FREE_MODELS: readonly ModelSpec[] = [
   {
     id: "@cf/zai-org/glm-4.7-flash",
     displayName: "GLM-4.7 Flash",
@@ -264,7 +403,20 @@ export const MODELS: readonly ModelSpec[] = [
   },
 ];
 
+/** Every registered model (paid first). Use modelsForPlan() for what a deployment serves. */
+export const MODELS: readonly ModelSpec[] = [...PAID_MODELS, ...FREE_MODELS];
+
 const BY_ID = new Map(MODELS.map((m) => [m.id, m]));
+
+/** True when the model can run on an account with this plan. */
+export function availableOnPlan(model: ModelSpec, plan: Plan): boolean {
+  return plan === "paid" || model.requiresPaid !== true;
+}
+
+/** Models served on this plan, not yet retired: paid models first, then the free ones. */
+export function modelsForPlan(plan: Plan, now: Date = new Date()): ModelSpec[] {
+  return MODELS.filter((m) => availableOnPlan(m, plan) && !isSunset(m, now));
+}
 
 export function findModel(id: string): ModelSpec | undefined {
   return BY_ID.get(id);

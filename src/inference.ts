@@ -7,7 +7,7 @@
  */
 
 import { HttpError, jsonResponse, sseResponse } from "./http";
-import type { ModelSpec, UpstreamParams } from "./models";
+import { parsePlan, type ModelSpec, type UpstreamParams } from "./models";
 import { parseResponsesRequest, type ParsedRequest } from "./responses";
 import { collectResponse, randomId, translateStream, type ResponseError } from "./streaming";
 
@@ -18,6 +18,8 @@ export interface AiRunner {
 export interface InferenceEnv {
   AI: AiRunner;
   DEFAULT_MODEL?: string;
+  /** "paid" enables Workers Paid-only models; anything else = Free. Set by setup.sh. */
+  WORKERS_PLAN?: string;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -187,7 +189,7 @@ function sessionAffinity(body: unknown): string | undefined {
 }
 
 export async function handleResponses(body: unknown, env: InferenceEnv, signal?: AbortSignal): Promise<Response> {
-  const req = parseResponsesRequest(body, env.DEFAULT_MODEL);
+  const req = parseResponsesRequest(body, env.DEFAULT_MODEL, parsePlan(env.WORKERS_PLAN));
   const inputs = buildUpstreamInputs(req);
   const affinity = sessionAffinity(body);
   // Observability (no content, no secrets): visible in `wrangler tail` / Workers Logs.

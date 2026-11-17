@@ -4,7 +4,10 @@
  * reasoning levels (instead of Codex's generic "fallback metadata").
  *
  *   node scripts/codex-catalog.ts [--out codex/snowy-models.json] [--codex-version 0.169.0]
- *                                 [--instructions-file path/to/prompt.md]
+ *                                 [--instructions-file path/to/prompt.md] [--plan free|paid]
+ *
+ * --plan paid adds the Workers Paid-only models at the top of /model (default: free).
+ * It must match the Worker's WORKERS_PLAN, or Codex lists models the Worker rejects.
  *
  * Every catalog entry must carry base instructions. By default this script downloads
  * the exact prompt Codex itself uses for unknown/local models
@@ -17,7 +20,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { MODELS, isSunset, supportedEfforts, type Effort, type ModelSpec } from "../src/models.ts";
+import { modelsForPlan, parsePlan, supportedEfforts, type Effort, type ModelSpec } from "../src/models.ts";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -59,11 +62,14 @@ async function baseInstructions(): Promise<string> {
 }
 
 const instructions = await baseInstructions();
-const models = MODELS.filter((m) => !isSunset(m) && m.functionCalling).map((m, i) => {
+const planArg = arg("plan") ?? "free";
+if (planArg !== "free" && planArg !== "paid") throw new Error(`--plan must be free or paid, got '${planArg}'`);
+const plan = parsePlan(planArg);
+const models = modelsForPlan(plan).filter((m) => m.functionCalling).map((m, i) => {
   const levels = supportedEfforts(m);
   return {
     slug: m.id,
-    display_name: `${m.displayName} (Cloudflare)`,
+    display_name: `${m.displayName} (Cloudflare${m.requiresPaid ? " Paid" : ""})`,
     description: `${m.category} · ${Math.round(m.contextWindow / 1000)}k context · ${m.neurons.inputPerM}/${m.neurons.outputPerM} neurons per M in/out${m.sunset ? ` · retires ${m.sunset}` : ""}`,
     default_reasoning_level: m.reasoning?.defaultEffort ?? null,
     supported_reasoning_levels: levels.map((effort) => ({ effort, description: effortDescription(m, effort) })),
@@ -94,4 +100,4 @@ const models = MODELS.filter((m) => !isSunset(m) && m.functionCalling).map((m, i
 const out = resolve(arg("out") ?? "codex/snowy-models.json");
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, `${JSON.stringify({ models }, null, 2)}\n`);
-console.error(`Wrote ${models.length} models to ${out}`);
+console.error(`Wrote ${models.length} models (${plan} plan) to ${out}`);

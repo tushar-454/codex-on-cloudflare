@@ -10,20 +10,23 @@
 #    2. pnpm install
 #    3. wrangler whoami -> logs you in if needed -> lists your Cloudflare accounts
 #    4. Writes the account you pick into wrangler.jsonc ("account_id")
-#    5. Generates (or reuses) the SNOWY_API_KEY token, saves it in .dev.vars
-#    6. Typechecks + runs the unit tests (mocked, free)
-#    7. Deploys the Worker and uploads SNOWY_API_KEY as a Worker secret
-#    8. Checks the live endpoint (/health, /v1/models)
-#    9. Installs / checks the Codex CLI
-#   10. Adds a "cloudflare" provider + "snowy" profile to Codex
+#    5. Detects Workers Free vs Paid; Paid enables the paid-only models
+#       (DeepSeek V4, GLM-5.3, Kimi, Inkling) → wrangler.jsonc "WORKERS_PLAN"
+#    6. Generates (or reuses) the SNOWY_API_KEY token, saves it in .dev.vars
+#    7. Typechecks + runs the unit tests (mocked, free)
+#    8. Deploys the Worker and uploads SNOWY_API_KEY as a Worker secret
+#    9. Checks the live endpoint (/health, /v1/models)
+#   10. Installs / checks the Codex CLI
+#   11. Adds a "cloudflare" provider + "snowy" profile to Codex
 #       (your normal `codex` provider/model/login are NOT changed)
-#   11. Saves the token for your shell and installs the `snowy` launcher
+#   12. Saves the token for your shell and installs the `snowy` launcher
 #
 #  Usage:
 #    ./setup.sh                 interactive (recommended)
 #    ./setup.sh --yes           accept the default answer for every question
 #    ./setup.sh --skip-tests    skip typecheck + unit tests
 #    ./setup.sh --skip-codex    only deploy the Worker, do not touch Codex
+#    ./setup.sh --plan=paid     skip plan detection (auto | free | paid; default auto)
 #    ./setup.sh --help
 #
 #  Env overrides:
@@ -31,6 +34,7 @@
 #    CLOUDFLARE_API_TOKEN    use an API token instead of `wrangler login` (headless/SSH)
 #    SNOWY_API_KEY           use this token instead of generating one
 #    CODEX_HOME              Codex config dir (default: ~/.codex)
+#    SNOWY_PLAN              same as --plan
 #
 #  Safe to re-run: every step is idempotent, and files it changes are backed up.
 # =============================================================================
@@ -61,6 +65,10 @@ MARK_END="# <<< snowy (managed by setup.sh) <<<"
 ASSUME_YES=0
 SKIP_TESTS=0
 SKIP_CODEX=0
+PLAN_MODE="${SNOWY_PLAN:-auto}"
+# Paid-only model used to detect the plan (one call, 1 output token, reasoning off):
+# Free accounts get HTTP 403 / Workers AI error 5035 (not billed); Paid accounts get a reply (~$0.00001).
+PLAN_PROBE_MODEL="@cf/deepseek-ai/deepseek-v4.1-flash-1017"
 
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t snowy)"
 chmod 700 "$TMP_DIR"
@@ -145,17 +153,20 @@ backup() { # backup <file>  (only if it exists)
 
 wrangler() { pnpm exec wrangler "$@"; }
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 for arg in "$@"; do
   case "$arg" in
     -y|--yes) ASSUME_YES=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
     --skip-codex) SKIP_CODEX=1 ;;
+    --plan=*) PLAN_MODE="${arg#--plan=}" ;;
     -h|--help) usage ;;
     *) fail "Unknown option: $arg (see ./setup.sh --help)" ;;
   esac
 done
+
+case "$PLAN_MODE" in auto|free|paid) ;; *) fail "--plan / SNOWY_PLAN must be auto, free or paid (got '$PLAN_MODE')." ;; esac
 
 printf '%s\n' "${B}SNOWy setup${N} — Codex CLI on Cloudflare Workers AI"
 info "Project: $SCRIPT_DIR"
@@ -328,7 +339,8 @@ if [ -n "$CURRENT_ACCOUNT" ]; then
   else warn "wrangler.jsonc account_id ($CURRENT_ACCOUNT) is NOT one of your accounts — you must change it."; fi
 fi
 info "The Worker will be deployed to the account set in ${B}wrangler.jsonc → \"account_id\"${N}."
-info "Use an account on the Workers ${B}Free${N} plan (Workers AI has a 10k Neurons/day free cap there)."
+info "Workers ${B}Free${N}: 10 models, capped at 10k Neurons/day (never billed)."
+info "Workers ${B}Paid${N}: also DeepSeek V4, GLM-5.3, Kimi K2.7, Inkling 2 — billed per token to that account."
 
 ACCOUNT_ID=""
 while [ -z "$ACCOUNT_ID" ]; do
@@ -370,6 +382,84 @@ info "Account: ${B}$ACCOUNT_NAME${N}"
 ask "Deploy SNOWy to this account?" y || fail "Cancelled. Re-run and pick another account."
 # Wrangler prefers the env var over the config file — keep them identical.
 export CLOUDFLARE_ACCOUNT_ID="$ACCOUNT_ID"
+
+
+# ---------------------------------------------------------------------------
+# 3b. Workers plan (Free / Paid) -> WORKERS_PLAN in wrangler.jsonc
+# ---------------------------------------------------------------------------
+step "Workers plan (Free / Paid)"
+
+current_config_plan() {
+  node -e '
+    const s = require("fs").readFileSync(process.argv[1], "utf8");
+    const m = s.match(/^\s*"WORKERS_PLAN"\s*:\s*"([^"]*)"/m); process.stdout.write(m ? m[1] : "");
+  ' "$WRANGLER_CONFIG"
+}
+write_config_plan() {
+  node -e '
+    const fs = require("fs"); const [f, plan] = process.argv.slice(1);
+    let s = fs.readFileSync(f, "utf8");
+    if (/^\s*"WORKERS_PLAN"\s*:/m.test(s)) {
+      s = s.replace(/^(\s*"WORKERS_PLAN"\s*:\s*)"[^"]*"/m, `$1"${plan}"`);
+    } else {
+      // Insert after DEFAULT_MODEL inside "vars".
+      const re = /^(\s*)"DEFAULT_MODEL"\s*:\s*"[^"]*",?[^\n]*\n/m;
+      const m = s.match(re);
+      if (!m) { console.error("could not find \"vars\" / DEFAULT_MODEL in wrangler.jsonc"); process.exit(1); }
+      const line = m[0].includes(",") ? m[0] : m[0].replace(/"\s*\n$/, "\",\n");
+      s = s.replace(re, `${line}${m[1]}"WORKERS_PLAN": "${plan}",\n`);
+    }
+    fs.writeFileSync(f, s);
+  ' "$WRANGLER_CONFIG" "$1"
+}
+
+# Prints paid | free | unknown. One tiny inference call on the selected account.
+detect_plan() {
+  local token code
+  if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then token="$CLOUDFLARE_API_TOKEN"
+  else token="$(wrangler auth token 2>/dev/null | tail -n1 | tr -d '[:space:]' || true)"; fi
+  [ -n "$token" ] || { echo unknown; return; }
+  # Header via a 600 file so the token never appears in the process list.
+  ( umask 077; printf 'Authorization: Bearer %s\n' "$token" >"$TMP_DIR/auth.hdr" )
+  code="$(curl -s -o "$TMP_DIR/plan.json" -w '%{http_code}' --max-time 60 \
+    -H @"$TMP_DIR/auth.hdr" -H 'Content-Type: application/json' \
+    "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/ai/run/$PLAN_PROBE_MODEL" \
+    -d '{"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":1,"reasoning_effort":"none"}' || true)"
+  rm -f "$TMP_DIR/auth.hdr"
+  if [ "$code" = 200 ]; then echo paid
+  elif grep -q '"code":5035' "$TMP_DIR/plan.json" 2>/dev/null; then echo free
+  else echo "unknown:$code"; fi
+}
+
+PLAN=""
+if [ "$PLAN_MODE" != auto ]; then
+  PLAN="$PLAN_MODE"
+  ok "Plan set by --plan / SNOWY_PLAN: ${B}$PLAN${N} (detection skipped)"
+else
+  info "Checking the plan with one 1-token call to a paid-only model ($PLAN_PROBE_MODEL)."
+  info "${DIM}Free: rejected with error 5035, nothing billed. Paid: costs a fraction of a cent.${N}"
+  DETECTED="$(detect_plan)"
+  case "$DETECTED" in
+    paid)
+      ok "Workers ${B}Paid${N} plan detected"
+      if ask "Enable the paid models (listed first in Codex /model; usage is billed to '$ACCOUNT_NAME')?" y; then PLAN=paid
+      else PLAN=free; info "Keeping the free models only."; fi ;;
+    free)
+      ok "Workers ${B}Free${N} plan detected — free models only (upgrade at https://dash.cloudflare.com/$ACCOUNT_ID/workers/plans, then re-run)" ;
+      PLAN=free ;;
+    *)
+      warn "Could not detect the plan (${DETECTED#unknown:}: $(head -c 200 "$TMP_DIR/plan.json" 2>/dev/null || true))."
+      if ask "Is '$ACCOUNT_NAME' on the Workers Paid plan?" n; then PLAN=paid; else PLAN=free; fi ;;
+  esac
+fi
+
+if [ "$(current_config_plan)" != "$PLAN" ]; then
+  backup "$WRANGLER_CONFIG"
+  write_config_plan "$PLAN"
+  ok "wrangler.jsonc WORKERS_PLAN → $PLAN"
+else
+  ok "wrangler.jsonc already uses WORKERS_PLAN=$PLAN"
+fi
 
 WORKER_NAME="$(node -e '
   const s = require("fs").readFileSync(process.argv[1], "utf8");
@@ -495,7 +585,7 @@ if [ "$healthy" = 1 ]; then
   code="$(curl -s -o "$TMP_DIR/models.json" -w '%{http_code}' --max-time 20 \
     -H "Authorization: Bearer $KEY" "$WORKER_URL/v1/models" || true)"
   case "$code" in
-    200) ok "GET /v1/models → 200 ($(node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log((j.data||[]).length+" models")}catch{console.log("ok")}' "$TMP_DIR/models.json"))" ;;
+    200) ok "GET /v1/models → 200 ($(node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const d=j.data||[];console.log(d.length+" models, "+d.filter(m=>m.requires_workers_paid).length+" paid, plan="+(j.workers_plan||"?"))}catch{console.log("ok")}' "$TMP_DIR/models.json"))" ;;
     401) warn "GET /v1/models → 401: the secret did not match. Re-run ./setup.sh to push it again." ;;
     500) warn "GET /v1/models → 500: secret missing/too short on the Worker. Re-run ./setup.sh." ;;
     *)   warn "GET /v1/models → HTTP $code" ;;
@@ -610,13 +700,13 @@ $MARK_END"
   fi
 
   # Model catalog: Cloudflare models in /model, real context windows, apply_patch tool.
-  CATALOG_LINE="# model_catalog_json = \"$CODEX_CATALOG\"   # run: pnpm codex:catalog --out $CODEX_CATALOG"
+  CATALOG_LINE="# model_catalog_json = \"$CODEX_CATALOG\"   # run: pnpm codex:catalog --out $CODEX_CATALOG --plan $PLAN"
   info "Generating the Codex model catalog (downloads Codex's base prompt from GitHub)..."
-  if pnpm --silent codex:catalog --out "$CODEX_CATALOG"; then
+  if pnpm --silent codex:catalog --out "$CODEX_CATALOG" --plan "$PLAN"; then
     CATALOG_LINE="model_catalog_json = \"$CODEX_CATALOG\""
     ok "catalog written: $CODEX_CATALOG"
   else
-    warn "Catalog generation failed (offline / GitHub rate limit?). Codex will still work, but /model shows OpenAI's list and there is no apply_patch tool. Re-run later: pnpm codex:catalog --out $CODEX_CATALOG"
+    warn "Catalog generation failed (offline / GitHub rate limit?). Codex will still work, but /model shows OpenAI's list and there is no apply_patch tool. Re-run later: pnpm codex:catalog --out $CODEX_CATALOG --plan $PLAN"
   fi
 
   PROFILE_CONTENT="# Managed by SNOWy setup.sh — loaded ONLY by \`codex --profile snowy\`.
@@ -624,6 +714,7 @@ $MARK_END"
 model_provider = \"cloudflare\"
 model = \"$DEFAULT_MODEL\"
 # Must be valid for the model. GLM / Gemma: none | high.  GPT-OSS: low | medium | high.  Qwen 3.8: low | medium | xhigh.
+# Paid: DeepSeek V4.x: none | low | high | xhigh.  GLM-5.3: low | high | xhigh.  Kimi K2.7: high.  Inkling 2: all levels.
 model_reasoning_effort = \"high\"
 # OpenAI-hosted web search cannot run on Workers AI.
 web_search = \"disabled\"
@@ -722,6 +813,7 @@ printf '\n%s━━ All set! ━━%s\n' "$B$G" "$N"
 cat <<EOF
 
   ${B}Cloudflare account${N}   $ACCOUNT_NAME ($ACCOUNT_ID)
+  ${B}Workers plan${N}         $PLAN$([ "$PLAN" = paid ] && printf ' (paid models enabled, listed first in /model)')
   ${B}Worker endpoint${N}      $WORKER_URL
   ${B}Codex base_url${N}       $BASE_URL
   ${B}Auth header${N}          Authorization: Bearer \$SNOWY_API_KEY
@@ -734,6 +826,7 @@ cat <<EOF
 
     snowy                                   # Codex on GLM-4.7 Flash (default)
     snowy @cf/openai/gpt-oss-120b high      # another model + effort
+$([ "$PLAN" = paid ] && printf '    snowy @cf/zai-org/glm-5.3 high          # a paid model\n')
     codex --profile snowy                   # same thing without the helper
     codex                                   # your normal OpenAI setup, unchanged
 
@@ -745,6 +838,6 @@ cat <<EOF
     pnpm exec wrangler tail                 # live logs
     ./setup.sh                              # re-run any time (safe)
 
-  Free plan: 10,000 Neurons/day (resets 00:00 UTC). Usage: Cloudflare dashboard → AI → Workers AI.
+  $([ "$PLAN" = paid ] && echo "Paid plan: Workers AI usage is billed per token." || echo "Free plan: 10,000 Neurons/day (resets 00:00 UTC).") Usage: Cloudflare dashboard → AI → Workers AI.
   ${DIM}Keep the token secret. To rotate: delete SNOWY_API_KEY from .dev.vars and re-run ./setup.sh.${N}
 EOF

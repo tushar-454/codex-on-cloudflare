@@ -8,7 +8,7 @@
  */
 
 import { HttpError } from "./http";
-import { ALL_EFFORTS, findModel, isSunset, MODELS, supportedEfforts, type Effort, type ModelSpec } from "./models";
+import { ALL_EFFORTS, availableOnPlan, findModel, isSunset, modelsForPlan, supportedEfforts, type Effort, type ModelSpec, type Plan } from "./models";
 
 // ---------- Chat types sent upstream ----------
 
@@ -77,10 +77,11 @@ function optionalNumber(body: Json, key: string, min: number, max: number): numb
 
 // ---------- models listing ----------
 
-export function listModels(now: Date = new Date()) {
+export function listModels(plan: Plan = "free", now: Date = new Date()) {
   return {
     object: "list",
-    data: MODELS.filter((m) => !isSunset(m, now)).map((m) => ({
+    workers_plan: plan,
+    data: modelsForPlan(plan, now).map((m) => ({
       id: m.id,
       object: "model",
       created: 0,
@@ -97,6 +98,7 @@ export function listModels(now: Date = new Date()) {
       reasoning_default_effort: m.reasoning?.defaultEffort ?? null,
       reasoning_default: m.reasoning?.defaultBehavior ?? null,
       free_plan_verified: m.freePlanVerified,
+      requires_workers_paid: m.requiresPaid === true,
       codex_compatibility: m.codex,
       neurons_per_million_tokens: { input: m.neurons.inputPerM, output: m.neurons.outputPerM },
       ...(m.sunset ? { sunset: m.sunset } : {}),
@@ -106,7 +108,7 @@ export function listModels(now: Date = new Date()) {
 
 // ---------- model + effort ----------
 
-export function resolveModel(id: unknown, fallback: string | undefined, now: Date = new Date()): ModelSpec {
+export function resolveModel(id: unknown, fallback: string | undefined, plan: Plan = "free", now: Date = new Date()): ModelSpec {
   const requested = id === undefined || id === null || id === "" ? fallback : id;
   if (typeof requested !== "string") throw invalid("'model' must be a string.", "model");
   const model = findModel(requested);
@@ -121,6 +123,15 @@ export function resolveModel(id: unknown, fallback: string | undefined, now: Dat
   }
   if (isSunset(model, now)) {
     throw new HttpError(410, "invalid_request_error", "model_retired", `Model '${model.id}' was retired by Cloudflare on ${model.sunset}.`, "model");
+  }
+  if (!availableOnPlan(model, plan)) {
+    throw new HttpError(
+      403,
+      "permission_error",
+      "model_requires_paid_plan",
+      `Model '${model.id}' requires the Workers Paid plan. This SNOWy endpoint runs with WORKERS_PLAN="${plan}"; re-run ./setup.sh on a Paid account to enable it.`,
+      "model",
+    );
   }
   return model;
 }
@@ -514,7 +525,7 @@ function convertToolChoice(choice: unknown, haveTools: boolean): unknown {
 
 // ---------- request ----------
 
-export function parseResponsesRequest(body: unknown, defaultModel: string | undefined, now: Date = new Date()): ParsedRequest {
+export function parseResponsesRequest(body: unknown, defaultModel: string | undefined, plan: Plan = "free", now: Date = new Date()): ParsedRequest {
   if (!isObject(body)) throw invalid("Request body must be a JSON object.");
   if (body.previous_response_id !== undefined && body.previous_response_id !== null) {
     throw invalid(
@@ -527,7 +538,7 @@ export function parseResponsesRequest(body: unknown, defaultModel: string | unde
 
   const responseFormat = convertTextFormat(body.text);
 
-  const model = resolveModel(body.model, defaultModel, now);
+  const model = resolveModel(body.model, defaultModel, plan, now);
   const { effort, ignored } = resolveEffort(body.reasoning, model);
   const messages = convertInput(body.instructions, body.input, model);
   const allTools = [...(Array.isArray(body.tools) ? body.tools : body.tools === undefined || body.tools === null ? [] : [body.tools]), ...extractAdditionalTools(body.input)];

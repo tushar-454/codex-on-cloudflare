@@ -11,6 +11,7 @@
 import { authenticate } from "./auth";
 import { errorResponse, HttpError, jsonResponse, readBodyLimited } from "./http";
 import { handleResponses } from "./inference";
+import { parsePlan } from "./models";
 import { listModels } from "./responses";
 
 const DEFAULT_MAX_BODY_BYTES = 4_000_000;
@@ -27,6 +28,7 @@ export interface SnowyEnv {
   RATE_LIMITER?: Pick<RateLimit, "limit">;
   MAX_BODY_BYTES?: string;
   DEFAULT_MODEL?: string;
+  WORKERS_PLAN?: string;
 }
 
 export async function handleRequest(request: Request, env: SnowyEnv): Promise<Response> {
@@ -65,7 +67,7 @@ export async function handleRequest(request: Request, env: SnowyEnv): Promise<Re
   }
 
   if (path === "/v1/models") {
-    return jsonResponse(listModels());
+    return jsonResponse(listModels(parsePlan(env.WORKERS_PLAN)));
   }
 
   const contentType = request.headers.get("Content-Type") ?? "";
