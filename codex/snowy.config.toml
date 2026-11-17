@@ -1,0 +1,12 @@
+# Save as ~/.codex/snowy.config.toml. Codex 0.169+ loads it ONLY when started with
+# `codex --profile snowy` (it is layered on top of ~/.codex/config.toml).
+model_provider = "cloudflare"
+model = "@cf/zai-org/glm-4.7-flash"
+# Must be valid for the model (your global setting may be "medium", which GLM rejects).
+# GLM / Gemma: none | high.  GPT-OSS: low | medium | high.  Qwen 3.8: low | medium | xhigh.
+model_reasoning_effort = "high"
+# OpenAI-hosted web search cannot run on Workers AI.
+web_search = "disabled"
+# Optional (recommended): Cloudflare models in /model, correct context windows, apply_patch tool.
+# Generate with `pnpm codex:catalog --out ~/.codex/snowy-models.json`; use an absolute path.
+# model_catalog_json = "/home/YOU/.codex/snowy-models.json"

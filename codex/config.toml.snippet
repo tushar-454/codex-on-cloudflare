@@ -1,0 +1,7 @@
+# Append to ~/.codex/config.toml. This only DEFINES the provider; it does not change
+# your default provider, model or OpenAI login. Replace YOUR-SUBDOMAIN.
+[model_providers.cloudflare]
+name = "Cloudflare Workers AI"
+base_url = "https://snowy-worker.YOUR-SUBDOMAIN.workers.dev/v1"
+env_key = "SNOWY_API_KEY"
+wire_api = "responses"
